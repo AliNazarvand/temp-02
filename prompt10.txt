@@ -1,0 +1,607 @@
+# پرامپت اجرایی نهایی — sim800-platform-all-new9
+
+## ۰. تصمیم استاندارد خروجی ZIP
+
+خروجی ZIP فقط در پایان اجرا و فقط در artifact تولید می‌شود؛ نه در هر فاز، نه به‌عنوان تنها خروجی، و نه به‌جای شاخه کاری، diff، commits و گزارش. دو آرشیو نهایی تولید می‌شود:
+
+1. `source-snapshot-<short-sha>.zip` — snapshot تمیز و کامل از پروژه هدف در commit نهایی HEAD، با `git archive --format=zip --prefix=sim800-platform-all-new9/ HEAD`؛ بدون `.git/`، بدون فایل‌های untracked، بدون venv/cache/artifact، بدون PDF اصلی، بدون secret، بدون فایل حجیم غیرضروری. این فایل فقط در artifact ذخیره می‌شود و هرگز کامیت یا آپلود نمی‌شود.
+2. `changes-bundle-<short-sha>.zip` — بسته تغییرات و audit شامل `report.md`، `changes.md`، `diff.patch`، `commits.txt`، `parity-checklist.md`، `usage.md`، `usage.json`، `budget.yaml`، `cost-estimate.json`، `state.json`، `reads.json`، `siblings-manifests/*.json`، `zero-byte-snapshot.txt`، `environment.lock.txt`، `tool-versions.txt` در صورت وجود، `check_encoding.py` و خروجی اسکن‌ها؛ بدون `cache/`، `context-summaries/`، `tool-outputs/`، `sibling-temp/`، `sibling-outputs/`، venv/tool-venv، PDF اصلی، secret، فایل حجیم غیرضروری و محتوای دارای محدودیت مجوز.
+
+هر دو ZIP پس از اسکن نهایی و پیش از گزارش نهایی ساخته می‌شوند؛ SHA256 هر دو در گزارش و `usage.json` ثبت می‌شود. اگر فایلی به‌دلیل secret، حجم، مجوز یا ممنوعیت از ZIP حذف شد، دلیل و مسیر آن در گزارش و Open TODOs ثبت می‌شود. ZIPها فقط محلی و در artifact هستند؛ هیچ push، PR، Issue، Release، Gist یا آپلود خارجی مجاز نیست.
+
+---
+
+## ۱. پروژه هدف و پروژه‌های خواهر
+
+- پروژه هدف: `sim800-platform-all-new9` — `https://github.com/AliNazarvand/sim800-platform-all-new9`
+- پروژه‌های خواهر منبع پورت:
+  - `sim800l-data-16` — `https://github.com/AliNazarvand/sim800l-data-16`
+  - `sim800-at-urc` — `https://github.com/AliNazarvand/sim800-at-urc`
+  - `sim800-capabilities` — `https://github.com/AliNazarvand/sim800-capabilities`
+- مخزن در انتظار دسترسی و خارج از دامنه ارزیابی/پورت: `SIM800-Monorepo` — `https://github.com/AliNazarvand/SIM800-Monorepo`؛ فقط در `Approval Needed` ثبت می‌شود.
+- زبان گزارش‌ها: فارسی. زبان کد، نام فایل‌ها، اسکیماها، نام کامیت‌ها: انگلیسی.
+- حالت اجرا: چندفازی، پیوسته، خودکار، محافظه‌کارانه، با Checkpoint اجباری پس از هر فاز و گزارش میان‌دوره‌ای در صورت توقف.
+- هر اقدام مخرب فقط گزارش می‌شود و انجام نمی‌شود، مگر استثناهای صریح: تکمیل فایل صفر بایت یا effectively empty طبق الگوریتم استنتاج؛ stub حداقلی با `raise NotImplementedError` برای رفع import شکسته؛ افزودن رکورد جدید به `dataset/` یا فایل جدید به `data/capabilities/` طبق سیاست پورت؛ افزودن فایل جدید به `generated/`؛ افزودن زیرفرمان `capabilities` به نقطه ورود CLI موجود پروژه هدف؛ افزودن ورودی به `.gitignore`. همه با ثبت در گزارش.
+- هدف: رساندن پروژه هدف به کامل‌ترین حالت ممکن، بدون آسیب به قابلیت‌های موجود و بدون باقی‌ماندن قابلیت قابل‌انتقال از سه پروژه خواهر. خروجی نهایی فقط محلی، در شاخه کاری مجزا، با گزارش کامل، دیف، کامیت‌ها، چک‌لیست پاریتی و آرشیوهای نهایی، آماده بازبینی دستی.
+- مسیر اختیاری ورودی: اگر `SIBLINGS_LOCAL_PATH` تنظیم شده و شامل سه clone محلی با ساختار `$SIBLINGS_LOCAL_PATH/<repo-name>/.git` باشد، از همان مسیرها فقط‌خواندنی استفاده می‌شود و clone شبکه‌ای انجام نمی‌شود. در نبود یا ناقص بودن آن، clone شبکه‌ای به `<parent-of-repo>/siblings/<name>/` انجام می‌شود و منبع هر clone با `local`، `network` یا `network_fallback` ثبت می‌گردد.
+
+---
+
+## ۲. مدیریت کردیت، توکن و context
+
+### ۲.۱ اصول
+
+- هر اجرا بودجه صریح توکن و فراخوانی دارد؛ عبور از بودجه مجاز نیست.
+- مصرف در سطح فاز، فراخوانی و ابزار ثبت می‌شود.
+- context با خلاصه‌سازی دوره‌ای مدیریت می‌شود؛ خروجی خام ابزارها بی‌حدود در context نگه داشته نمی‌شود.
+- خواندن فایل محدود و هدفمند است؛ خواندن کامل فایل بزرگ نیازمند توجیه و ثبت در `reads.json` است.
+- خروجی‌های قطعی و تکرارپذیر در `cache/` کش می‌شوند.
+- وضعیت اجرا در `state.json` ذخیره می‌شود تا توقف و ازسرگیری بدون دوباره‌کاری ممکن باشد.
+- پیش از شروع، `cost-estimate.json` تولید می‌شود؛ برآورد بیشینه بیش از ۸۰٪ بودجه کل، اجرا را متوقف می‌کند.
+- در ۸۰٪ بودجه حالت خلاصه‌محور و در ۹۵٪ توقف اعمال می‌شود.
+
+### ۲.۲ پیکربندی بودجه
+
+`budget.yaml` در artifact:
+
+```yaml
+token_budget:
+  input_max: 3000000
+  output_max: 600000
+  total_max: 3600000
+api_calls_max: 800
+wall_time_max_hours: 14
+commits_max: 150
+context_window_tokens: 200000
+thresholds:
+  compaction: 0.70
+  aggressive_compaction: 0.85
+  warn: 0.80
+  halt: 0.95
+limits:
+  max_read_lines_per_file: 2000
+  max_tool_output_lines_in_context: 500
+  max_full_read_bytes: 1048576
+```
+
+مقادیر از متغیرهای محیطی قابل بازنویسی هستند: `AI_TOKEN_BUDGET_INPUT`, `AI_TOKEN_BUDGET_OUTPUT`, `AI_API_CALLS_MAX`, `AI_WALL_TIME_MAX_HOURS`, `AI_COMMITS_MAX`, `AI_CONTEXT_WINDOW`, `AI_COMPACTION_THRESHOLD`, `AI_WARN_THRESHOLD`, `AI_HALT_THRESHOLD`, `AI_MAX_READ_LINES`, `AI_MAX_TOOL_OUTPUT_LINES`, `AI_MAX_FULL_READ_BYTES`.
+
+### ۲.۳ ردیابی مصرف
+
+`usage.json` در artifact، پس از هر فاز و هر عملیات سنگین به‌روزرسانی می‌شود:
+
+```json
+{
+  "run_id": "<uuid>",
+  "started_at": "<iso8601>",
+  "phases": {
+    "phase_0": {"api_calls": 0, "input_tokens": 0, "output_tokens": 0, "tool_calls": 0, "wall_seconds": 0, "cache_hits": 0, "cache_misses": 0},
+    "phase_1": {}, "phase_2_1": {}, "phase_2_2": {}, "phase_2_3": {}, "phase_2_4": {}, "phase_2_5": {}, "phase_3": {}
+  },
+  "totals": {"api_calls": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "tool_calls": 0, "wall_seconds": 0, "cache_hits": 0, "cache_misses": 0},
+  "budget": {"input_max": 0, "output_max": 0, "total_max": 0, "api_calls_max": 0},
+  "remaining": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "api_calls": 0},
+  "ratios": {"input_used": 0.0, "output_used": 0.0, "total_used": 0.0, "api_used": 0.0},
+  "events": [{"at": "<iso8601>", "type": "warn|halt|compaction", "detail": "..."}]
+}
+```
+
+توکن‌ها از پاسخ‌های API و در نبود شمارش دقیق به‌صورت تخمینی از کاراکترها استخراج می‌شوند: ۱ توکن ≈ ۴ کاراکتر متن انگلیسی و ۱ توکن ≈ ۲ کاراکتر متن فارسی. روش تخمین در `usage.json` ثبت می‌شود.
+
+### ۲.۴ برآورد پیش از اجرا
+
+پس از baseline و پیش از فاز ۰، `cost-estimate.json` تولید می‌شود و شامل تعداد فایل‌های هدف، حجم کل، تعداد رکوردها، تعداد Schemaها، برآورد توکن هر فاز برای خواندن/تولید/اعتبارسنجی/تست، برآورد تعداد فراخوانی API، و بازه کمینه/بیشینه با فرض نرخ compaction است. اگر برآورد بیشینه > ۸۰٪ بودجه کل باشد: توقف پیش از اجرا، ثبت در Approval Needed و گزارش.
+
+### ۲.۵ مدیریت context
+
+- اندازه context تقریبی ردیابی می‌شود: کاراکتر / ۴.
+- عبور از `compaction` پیش‌فرض ۷۰٪ `context_window_tokens`: خلاصه‌سازی فاز جاری، حذف خروجی خام ابزارها از context، نگهداری مسیر فایل‌های خام، نوشتن خلاصه در `context-summaries/<timestamp>.md`.
+- عبور از `aggressive_compaction` ۸۵٪: نگهداری فقط وضعیت ضروری، تصمیمات، مسیرهای خروجی و TODOs.
+- عبور از `halt` ۹۵٪: توقف، checkpoint و گزارش میان‌دوره‌ای.
+- خلاصه شامل فاز جاری، اقدامات انجام‌شده، نتایج کلیدی، مسیر خروجی‌ها، تصمیمات و TODOs است.
+
+### ۲.۶ محدودیت خواندن فایل
+
+- پیش از خواندن کامل، `wc -l` و `stat` ثبت می‌شود.
+- اگر خطوط > `max_read_lines_per_file` یا حجم > `max_full_read_bytes`: خواندن کامل فقط با توجیه صریح در `reads.json` و ذکر دلیل.
+- در حالت عادی: `grep`, `head`, `tail` یا خواندن قطعه‌ای.
+- هش فایل ذخیره می‌شود؛ اگر تغییر نکرده، از نسخه کش‌شده استفاده می‌شود.
+- `reads.json` شامل مسیر، حجم، تعداد خطوط، هش، نوع خواندن (`full|partial|grep|cached`) و توجیه است.
+
+### ۲.۷ محدودیت خروجی ابزار
+
+- خروجی ابزار > `max_tool_output_lines_in_context` پیش‌فرض ۵۰۰ خط: خروجی خام در `tool-outputs/` ذخیره و فقط خلاصه حداکثر ۲۰ خط + مسیر خام در context درج می‌شود.
+- خلاصه شامل نام ابزار، کد خروج، یافته‌های کلیدی و مسیر خام است.
+- این قاعده برای `pytest`, `ruff`, `mypy`, `git diff`, `git log`, `json validation`, `generator output` و مشابه اعمال می‌شود.
+- خروجی کوچک < ۵۰ خط بدون خلاصه درج می‌شود.
+
+### ۲.۸ کش کردن
+
+`cache/` در artifact با ساختار content-addressed:
+
+- `cache/validation/<sha256(schema||data)>.json`
+- `cache/generated/<sha256(generator||input||options)>.hpp`
+- `cache/manifest/<sha256(repo||commit)>.json`
+- `cache/parse/<sha256(file)>.json`
+
+کلید کش = SHA256 از ترکیب ورودی‌ها و تنظیمات. در اجرای مجدد، قبل از هر عملیات سنگین کش بررسی می‌شود. هر hit/miss در `usage.json` و `cache/<type>/_log.jsonl` ثبت می‌شود. کش فقط محلی و در artifact است؛ هرگز کامیت نمی‌شود. برای ابزارهای غیرقطعی مانند تست‌های وابسته به شبکه/سخت‌افزار کش اعمال نمی‌شود.
+
+### ۲.۹ پروتکل Resume
+
+`state.json` در artifact پس از هر فاز و checkpoint:
+
+```json
+{
+  "run_id": "<uuid>",
+  "artifact_path": "<redacted-in-report>",
+  "working_branch": "ai/full-completion",
+  "baseline_sha": "<sha>",
+  "last_completed_phase": "<phase_id>",
+  "last_completed_commit": "<sha>",
+  "next_action": "<description>",
+  "completed_commits": ["<sha>", "..."],
+  "pending_blockers": ["..."],
+  "checkpoints": [{"at": "<iso8601>", "phase": "<id>", "summary_path": "..."}],
+  "usage_ref": "usage.json"
+}
+```
+
+در اجرای مجدد نخست `state.json` خوانده می‌شود؛ اگر `run_id` و `baseline_sha` منطبق باشند، اجرا از `next_action` ادامه می‌یابد و کش‌ها بازاستفاده می‌شوند؛ در غیر این صورت اجرای جدید تلقی می‌شود.
+
+### ۲.۱۰ آستانه‌های بودجه
+
+- در ۸۰٪ بودجه (`warn`): ثبت رویداد؛ فعال‌سازی حالت خلاصه‌محور؛ خواندن کامل فقط برای فایل‌های حیاتی و کوچک؛ خروجی ابزارها کوتاه‌تر؛ عدم اجرای دوباره عملیات کش‌شده.
+- در ۹۵٪ بودجه (`halt`): توقف فوری، checkpoint، گزارش میان‌دوره‌ای با وضعیت، تغییرات انجام‌شده، اقدامات باقی‌مانده و مصرف بودجه.
+- بودجه شامل مجموع input+output tokens و api_calls است؛ هر کدام جداگانه بررسی می‌شود.
+
+### ۲.۱۱ گزارش مصرف
+
+بخش `Usage & Budget` در گزارش نهایی و فایل `usage.md` شامل بودجه اولیه، مصرف نهایی به تفکیک فاز، درصد مصرف کل، تعداد cache hit/miss، تعداد compactionها، برآورد اولیه در برابر مصرف واقعی و رویدادهای warn/halt است.
+
+---
+
+## ۳. Checklist
+
+بخش `## Checklist` در ابتدای گزارش ایجاد و پس از هر فاز یا گزارش میان‌دوره‌ای با `[x]`, `[ ]`, `[skipped: reason]` علامت‌گذاری می‌شود:
+
+- ثبت baseline، زمان شروع اجرا و زمان شروع نصب
+- مقداردهی بودجه، `usage.json`، `cache/`، `state.json`
+- برآورد پیش از اجرا و دروازه تأیید بودجه
+- ساخت برنچ پشتیبان `backup/pre-ai` یا نسخه timestamp‌دار
+- غیرفعال‌سازی دو لایه‌ای push در پروژه هدف و تست آن
+- غیرفعال‌سازی push در سه clone پروژه خواهر و تست آن، یا fallback local-only
+- ساخت شاخه کاری `ai/full-completion`
+- snapshot فایل‌های صفر بایت و effectively empty
+- نصب وابستگی‌ها و ابزارها
+- فاز ۱ — تکمیل ایمن فایل‌های خالی
+- اعتبارسنجی Schemaها و داده‌های پروژه هدف
+- فاز ۲.۱ — آماده‌سازی سه پروژه خواهر و تولید manifest
+- فاز ۲.۲ — پورت داده از `sim800l-data-16` به `dataset/` با provenance
+- فاز ۲.۳ — مولد هدر C++17 از `sim800-at-urc` و تولید هدرها
+- فاز ۲.۴ — گسترش یا افزودن Schemaهای AT/URC
+- فاز ۲.۵ — پورت پایگاه داده قابلیت‌های سخت‌افزاری از `sim800-capabilities`
+- اعتبارسنجی کامل Schemaها، داده‌ها و هدرها پس از پورت
+- اجرای تست‌ها و lint
+- اسکن secrets، مجوز، حجم فایل، encoding
+- فاز ۳ — چک‌لیست پاریتی و تأیید پوشش کامل
+- تولید گزارش نهایی، artifactها و آرشیوهای ZIP نهایی
+- بازبینی نهایی و ثبت Approval Needed شامل `SIM800-Monorepo`
+- ثبت مصرف نهایی، مقایسه با بودجه و رویدادهای بودجه
+
+---
+
+## ۴. وضعیت اولیه مفروض
+
+پروژه هدف نسخه‌ای تمیزشده است که ممکن است بسیاری از فایل‌ها، به‌ویژه Schemaهای JSON، مستندات و فایل‌های پیکربندی، حجم صفر یا محتوای عملاً خالی داشته باشند. سه پروژه خواهر از طریق `SIBLINGS_LOCAL_PATH` یا clone شبکه‌ای در دسترس قرار می‌گیرند و مجوز آن‌ها اجازه پورت داده و کد را می‌دهد؛ در صورت محدودیت مجوز، طبق قید انتشار عمل و پورت آن بخش گزارش می‌شود، نه انجام. `SIM800-Monorepo` محتوای قابل‌دسترسی ندارد و فقط در Approval Needed ثبت می‌شود.
+
+---
+
+## ۵. تعریف مفاهیم کلیدی
+
+- **فایل حیاتی:** هر فایل در `src/`, `data/schemas/`, `data/capabilities/`, `scripts/`, `tests/`, `dataset/`, `generated/`, `pyproject.toml`, `requirements.txt`, `Makefile`, فایل‌های CI, مستندات ریشه, `docs/`, `mkdocs.yml` که برای اجرا، اعتبارسنجی، تولید خروجی یا پورت لازم است. فایل‌های CI فقط گزارش می‌شوند و تغییر نمی‌کنند.
+- **فایل واقعاً زائد:** فایلی بدون هیچ ارجاع در کد، اسکریپت، مستندات یا پیکربندی؛ حذف فقط با ثبت در Approval Needed و بدون اجرا.
+- **حداقل اصلاح:** کوچک‌ترین تغییر برای رفع خطای مسدودکننده، بدون بازنویسی منطق موجود.
+- **خطای مسدودکننده:** خروج غیرصفر از اسکریپت، traceback، fail اعتبارسنجی Schema، یا fail تست. lint و warning مسدودکننده نیستند، اما lint می‌تواند مانع یک کامیت خاص شود.
+- **محتوای حداقلی معتبر:** فقط ادعاهای قابل اثبات از کد، Schema، داده نمونه یا مستندات، با ارجاع به شاهد.
+- **اسکیمای معتبر:** سند JSON Schema که با `jsonschema` پارس شود، `$schema` صریح داشته باشد، همه رکوردهای متناظر را بپذیرد، و هیچ فیلد اجباری یا محدودیتی خارج از شواهد تعریف نکند. Schemaهای دارای `$ref` خارجی تأییدنشده از اعتبارسنجی داده مستثنا و با وضعیت مشخص گزارش می‌شوند.
+- **اسکیمای ضعیف:** Schema معتبر بدون `required` غیرخالی و بدون `properties` غیرخالی؛ شدت Medium در Open TODOs. Schema با `properties` غیرخالی و بدون `required` فقط با وضعیت `no required` ثبت می‌شود.
+- **اسکیمای عملاً خالی:** Schema که پس از `json.load` معادل `{}` است، یا فقط `$schema` و اختیاراً `$id/title` دارد و هیچ‌کدام از `properties, required, items, oneOf, anyOf, allOf, $ref` را ندارد، یا `properties: {}` با `required: []` یا بدون `required` است.
+- **اسکیمای ناقص:** Schema معتبر غیرخالی که `required` به فیلد تعریف‌نشده در `properties` ارجاع می‌دهد یا `properties: {}` با `required` غیرخالی دارد؛ شدت Medium در Open TODOs و بدون شاهد قطعی اصلاح نمی‌شود.
+- **شاهد:** رکورد نمونه، خط کد، خروجی اسکریپت یا بخش مشخص مستندات، با ارجاع دقیق. حداقل شاهد: ۳ رکورد یا ۱ ارجاع مستقیم کد/مستند. برای `required`، شاهد اصلی حضور در ۱۰۰٪ رکوردهای نمونه است؛ ارجاع کد/مستند تقویتی است و نبودش وضعیت `data-only required` ایجاد می‌کند. برای `enum`، شاهد باید مستند یا کد صریح باشد؛ داده‌تنها کافی نیست و فقط کاندید در Open TODOs ثبت می‌شود.
+- **اسکریپت شناخته‌شده:** هر فایل در `scripts/` یا `tools/` که در `Makefile`, CI, `docs/` یا `README.md` ارجاع دارد. بقیه «ناشناخته» و فقط گزارش می‌شوند.
+- **اقدام مخرب:** حذف فایل؛ بازنویسی بیش از `min(50, ceil(0.20 × N))` خط که N تعداد خطوط فایل است؛ تغییر ساختار پوشه؛ اجرای اسکریپت ناشناخته؛ تغییر فایل‌های CI؛ هر تغییری در رکوردهای موجود `dataset/`. تغییراتی که صرفاً محتوای فایل صفر بایت یا effectively empty را طبق الگوریتم‌های تعریف‌شده ایجاد می‌کنند، مشمول این آستانه نیستند.
+- **استثنای اقدام مخرب:** تکمیل فایل صفر بایت یا effectively empty طبق الگوریتم استنتاج؛ stub حداقلی با `raise NotImplementedError` برای رفع import شکسته؛ افزودن رکورد جدید به `dataset/` یا فایل جدید به `data/capabilities/` طبق سیاست پورت؛ افزودن فایل جدید به `generated/`؛ افزودن زیرفرمان `capabilities` به فایل CLI موجود پروژه هدف به‌عنوان بخشی از فاز ۲.۵، محدود به نقطه ورود CLI و بدون بازنویسی منطق موجود؛ افزودن ورودی به `.gitignore`. همه با ثبت در گزارش.
+- **پورت قابلیت:** انتقال یک قابلیت مشخص از یک پروژه خواهر به پروژه هدف، شامل داده، Schema، کد یا مولد، با حفظ provenance کامل.
+- **Provenance:** برای هر موجودیت پورت‌شده ثبت می‌شود: URL مخزن مبدأ، commit SHA، مسیر فایل مبدأ، هش SHA256 فایل مبدأ، تاریخ پورت و مسیر مقصد در پروژه هدف.
+- **Manifest پروژه خواهر:** `manifest.json` در فاز ۲.۱ شامل `commit_sha`, `license`, `generated_at`, `source` (`local|network|network_fallback`), `resolved_path`, و فهرست دقیق فایل‌ها با مسیر نسبی، SHA256، نوع، تعداد رکورد در صورت کاربرد و کلیدهای سطح بالا. مبنای مکانیکی تصمیم‌گیری پورت است.
+- **چک‌لیست پاریتی:** فهرست قابلیت‌های سه پروژه خواهر با وضعیت `covered / partially covered / not applicable / blocked`.
+- **مستندات:** هر `.md` در ریشه یا `docs/`.
+- **`examples/`:** مشمول تکمیل خودکار نیست، فقط گزارش می‌شود.
+- **حالت مخزن:** اگر اجرا از working tree موجود انجام می‌شود، کلون مجدد انجام نمی‌شود. اگر `SIBLINGS_LOCAL_PATH` تنظیم شده، cloneهای خواهر از آن مسیر خوانده می‌شوند. در غیر این صورت clone پروژه‌های خواهر به `<parent-of-repo>/siblings/<name>/` خارج از پروژه هدف و فقط‌خواندنی است.
+- **ممنوعیت نوشتن در sibling:** هیچ دستور، اسکریپت یا ابزاری که از پروژه خواهر اجرا می‌شود نباید در working tree آن بنویسد. اگر ابزاری (مثل `generate.py` یا `validate.py`) به‌طور پیش‌فرض در محل خود می‌نویسد، باید با `--output/--out-dir` یا متغیر محیطی معادل به artifact/temp هدایت شود، یا پروژه خواهر به کپی موقت در artifact منتقل و از آنجا اجرا شود. `git status --porcelain` قبل و بعد ثبت و مقایسه می‌شود؛ اختلاف = `sibling write violation`.
+- **افشای مسیر:** گزارش نهایی نباید مسیر مطلق محلی کاربر را افشا کند. `resolved_path` در manifest می‌تواند مطلق باشد، اما در گزارش نهایی با `<artifact>/siblings/<name>` یا `<parent-of-repo>/siblings/<name>` redact/نسبی می‌شود.
+
+---
+
+## ۶. Baseline و محیط اجرا
+
+پیش از هر تغییر ثبت و در گزارش درج می‌شود:
+
+- `git rev-parse HEAD` پروژه هدف
+- نام و نسخه شاخه مبنا
+- نسخه Python از `.python-version` یا `pyproject.toml` یا `python --version`
+- سیستم‌عامل و نسخه
+- `run_start_time` هنگام اولین دستور
+- `install_start_time` هنگام اولین دستور نصب
+- وضعیت `SIBLINGS_LOCAL_PATH`: تنظیم‌شده/تنظیم‌نشده؛ در صورت تنظیم، مسیر resolved و وجود سه clone بررسی شود؛ مسیر در گزارش redact می‌شود.
+- `git status --porcelain`. اگر غیرخالی بود، اجرا متوقف و وضعیت ثبت می‌شود. هیچ `stash/reset/checkout` روی تغییرات کاربر انجام نمی‌شود.
+- `git config user.name` و `user.email`. اگر تنظیم نیست، اجرا پیش از هر کامیت متوقف می‌شود.
+- venv اجرایی: اگر `.venv` نیست، `python -m venv .venv`. اگر هست، سازگاری major.minor بررسی شود. ناسازگار: بدون حذف/`--clear`، venv جایگزین در `<parent-of-repo>/sim800-audit-output/venv/` ساخته و mismatch ثبت شود. نصب: اگر `pyproject.toml` هست `pip install -e .`، سپس `pip install -r requirements.txt` فقط اگر در Makefile یا CI ارجاع دارد. تناقض: `pyproject.toml` مرجع. اگر `setup.py` بدون `pyproject.toml` بود، `pip install -e .` با هشدار legacy. شکست editable: ابتدا `pip install .`، سپس `requirements.txt`، و ثبت `editable install failed`.
+- نصب ابزارها: `pytest`, `ruff`, `mypy`, `jsonschema` از pin یا tool-venv جداگانه در `<parent-of-repo>/sim800-audit-output/tool-venv/`. reuse فقط اگر major.minor سازگار، `pytest --version` موفق، `import jsonschema` موفق و pin منطبق باشد؛ در غیر این صورت rename به `tool-venv-<timestamp>` و ساخت جدید. اگر `pytest` یا `jsonschema` unavailable: توقف. `ruff/mypy` unavailable: حذف از گردش‌کار با ثبت.
+- `environment.lock.txt` و در صورت استفاده `tool-versions.txt` در artifact.
+- وضعیت شبکه: دسترسی به PyPI و GitHub و اقدام جایگزین در صورت قطع.
+- snapshot فایل‌های صفر بایت بدون `.gitkeep` و effectively empty در `zero-byte-snapshot.txt`.
+- وضعیت اولیه تست‌ها/ruff/mypy: خروجی کامل در artifact. اگر Makefile هدف `test` دارد و فقط pytest یا اسکریپت شناخته‌شده اجرا می‌کند، `make test`؛ در غیر این صورت pytest مستقیم و دلیل ثبت شود.
+- برنچ پشتیبان: `backup/pre-ai` از HEAD. اگر وجود دارد، `backup/pre-ai-<timestamp ISO8601 بدون کاراکتر غیرمجاز>`.
+- بررسی origin با `git remote get-url origin`. اگر نیست: `skipped: no origin remote`. URL اصلی push با `git remote get-url --push origin` ذخیره شود؛ اگر خالی بود از URL fetch.
+- بررسی LFS و submodule: اگر `.gitattributes` شامل `filter=lfs` بود، `LFS detected, content may be pointer`. اگر `dataset/*.jsonl` یا `data/capabilities/**/*.yaml` pointer LFS بود، `LFS pointer, not data`، در استنتاج استفاده نشود، malformed محسوب نشود. submoduleها `not cloned` گزارش شوند و محتوایشان در استنتاج استفاده نشود.
+- هماهنگی نسخه Python: اگر `.python-version` هست، venv با آن ساخته شود؛ در نبود آن نسخه، `python version mismatch`.
+- جست‌وجوی مجوز: `LICENSE*`, `COPYING*`, `UNLICENSE*` در ریشه پروژه هدف و هر سه پروژه خواهر. نام مجوز هر چهار مخزن ثبت شود. اگر مجوز پروژه خواهر اجازه پورت نمی‌دهد، آن بخش به Approval Needed منتقل و پورت نمی‌شود.
+- `SIM800-Monorepo access status: unavailable`؛ در Approval Needed ثبت شود.
+- بودجه: `budget.yaml` مقداردهی و در artifact ذخیره شود. `usage.json` با مقادیر صفر آغاز شود. `state.json` با `run_id`, `baseline_sha`, `artifact_path`, `working_branch` و `next_action: "phase_0"` ایجاد شود. پوشه‌های `cache/` و `context-summaries/` ایجاد شوند.
+- `cost-estimate.json` پیش از فاز ۰ تولید و در گزارش ثبت شود.
+
+---
+
+## ۷. مسیر artifact
+
+`<parent-of-repo>/sim800-audit-output/` خارج از همه مخازن. مسیر مطلق resolved در گزارش redact یا نسبی می‌شود. هیچ کامیتی این مسیر را شامل نمی‌شود. اگر artifact داخل repo ساخته شد، در `.git/info/exclude` ثبت شود. venvها، tool-venv و نسخه‌های timestamp‌دار هرگز در آرشیو نهایی قرار نگیرند.
+
+زیرمسیرهای artifact:
+
+- `budget.yaml`, `usage.json`, `usage.md`, `cost-estimate.json`, `state.json`, `reads.json`
+- `context-summaries/`
+- `cache/` با `validation/`, `generated/`, `manifest/`, `parse/`
+- `siblings-manifests/`
+- `sibling-temp/`
+- `sibling-outputs/`
+- `tool-outputs/`
+- `venv/` در صورت mismatch نسخه Python
+- `tool-venv/` در صورت نیاز
+- `source-snapshot-<short-sha>.zip`
+- `changes-bundle-<short-sha>.zip`
+
+---
+
+## ۸. محدوده کار
+
+### فاز ۰ — آماده‌سازی
+
+- پروژه هدف محلی بدون clone مجدد اگر working tree موجود است.
+- مقداردهی بودجه، `usage.json`, `state.json`, `cache/`, `context-summaries/`, `reads.json`.
+- تولید `cost-estimate.json` و دروازه تأیید بودجه.
+- غیرفعال‌سازی دو لایه‌ای push در پروژه هدف:
+  - `git config --local push.default nothing`
+  - `git remote set-url --push origin no_push`
+  - تست لایه اول: `git push --dry-run origin HEAD` باید خروج غیرصفر بدهد. دلیل مورد انتظار: نامعتبر بودن `no_push` به‌عنوان URL و/یا `push.default nothing`. معیار موفقیت: خروج غیرصفر. خروجی خام و کد خروج ثبت شود.
+  - تست لایه دوم: `git remote get-url --push origin` برابر `no_push` باشد؛ سپس `git -c push.default=current push --dry-run origin HEAD` باید خروج غیرصفر بدهد. دلیل مورد انتظار: نامعتبر بودن `no_push` به‌عنوان URL. معیار موفقیت: خروج غیرصفر. خروجی خام و کد خروج ثبت شود.
+  - اگر هر یک موفق نبود: توقف.
+  - دستورهای بازگردانی `git remote set-url --push origin <original-push-url>` و `git config --local --unset push.default` ثبت شوند.
+- ساخت شاخه کاری `ai/full-completion` از HEAD.
+- snapshot فایل‌های صفر بایت و effectively empty، دسته‌بندی به Schemaهای داده، مستندات، پیکربندی، README، کد منبع، تست‌ها، سایر؛ ذخیره در artifact.
+
+### فاز ۱ — تکمیل ایمن فایل‌های خالی
+
+مطابق الگوریتم استنتاج Schema. محدوده: `data/schemas/*.schema.json` و `data/capabilities/schema/*.json`. `src/`, `scripts/`, `tests/`, `docs/` فقط گزارش می‌شوند؛ استثنا: stub حداقلی با `raise NotImplementedError` برای فایل import‌شده‌ای که نبودش اجرا را می‌شکند. فایل تست صفر بایت پر نمی‌شود. `examples/` گزارش می‌شود. هر داده غیرخالی نامعتبر pre-existing گزارش می‌شود و اصلاح نمی‌شود، مگر با شاهد قطعی مانند خطای واضح syntax. `$ref` طبق قاعده مدیریت می‌شود. خطوط نامعتبر JSONL به‌عنوان `pre-existing malformed line` گزارش و در استنتاج نادیده گرفته می‌شوند؛ در اعتبارسنجی نهایی به‌عنوان fail ثبت می‌شوند، بدون اصلاح خودکار.
+
+Checkpoint 1: گزارش میان‌دوره‌ای با فهرست Schemaهای پر‌شده، weak، incomplete، insufficient evidence و pre-existing invalid. ثبت مصرف فاز در `usage.json`.
+
+### فاز ۲.۱ — آماده‌سازی سه پروژه خواهر و تولید manifest
+
+- اگر `SIBLINGS_LOCAL_PATH` تنظیم شده و شامل سه پوشه `<repo-name>/` با `.git` باشد، از همان مسیرها فقط‌خواندنی استفاده شود؛ `source: local`. هیچ clone شبکه‌ای انجام نشود.
+- در غیر این صورت clone هر سه مخزن به `<parent-of-repo>/siblings/<name>/`؛ `source: network`.
+- اگر از `SIBLINGS_LOCAL_PATH` خوانده شد و ناقص بود، آن پروژه به clone شبکه‌ای سقوط کند؛ `source: network_fallback`.
+- غیرفعال‌سازی push در clone:
+  - اگر clone شبکه‌ای انجام شد یا پوشه محلی قابل‌نوشتن است: `git config --local push.default nothing` و `git remote set-url --push origin no_push`؛ تست لایه اول `git push --dry-run origin HEAD` با خروج غیرصفر لازم؛ تست لایه دوم `git remote get-url --push origin == no_push` و `git -c push.default=current push --dry-run origin HEAD` با خروج غیرصفر لازم. خروجی خام و کد خروج ثبت شود.
+  - fallback local-only: اگر پوشه محلی فقط‌خواندنی است و `.git/config` قابل نوشتن نیست، غیرفعال‌سازی دائمی ممکن نیست. این حالت با برچسب `residual risk: push not permanently disabled in read-only sibling` ثبت شود. صریحاً نوشته شود: هیچ تغییر دائمی در `.git/config` نوشته نشده؛ محافظت فقط با overrideهای موقت است؛ اگر کاربر بعداً دستی push کند محافظت وجود ندارد؛ پیشنهاد: `.git/config` قابل‌نوشتن یا clone قابل‌نوشتن.
+  - تست لایه اول local-only: `git -c remote.origin.pushurl=no_push push --dry-run origin HEAD` با خروج غیرصفر لازم. تست لایه دوم: `git -c push.default=current -c remote.origin.pushurl=no_push push --dry-run origin HEAD` با خروج غیرصفر لازم. نتیجه با برچسب `local-only push test` و خروجی خام و کد خروج ثبت شود. دستور بازگردانی لازم نیست؛ همین در گزارش ثبت گردد.
+- ثبت commit SHA، نام مجوز و خلاصه ساختار پوشه.
+- تولید `manifest.json` در `<parent-of-repo>/sim800-audit-output/siblings-manifests/<name>.json`. فقط در صورت غیرقابل‌نوشتن بودن artifact، یک نسخه داخل مخزن خواهر در `siblings/<name>/manifest.json` نوشته و مسیر هر دو ثبت شود. ساختار:
+
+```json
+{
+  "repo": "<name>",
+  "source": "local|network|network_fallback",
+  "resolved_path": "<absolute path to sibling working tree used for porting>",
+  "commit_sha": "<sha>",
+  "license": "<name>",
+  "generated_at": "<iso8601>",
+  "files": [
+    {
+      "path": "<relative path>",
+      "sha256": "<hash>",
+      "type": "yaml|json|py|md|...",
+      "record_count": null,
+      "top_level_keys": ["..."],
+      "top_level_symbols": ["..."]
+    }
+  ]
+}
+```
+
+`resolved_path` مبنای اجرای ابزارهای پروژه خواهر است و در گزارش نهایی redact می‌شود. برای YAML/JSON، `record_count` و `top_level_keys`؛ برای کد، `top_level_symbols` در صورت استخراج آسان.
+
+- بازرسی ساختار و انتظارات:
+  - از `sim800l-data-16`: حضور ۱۸ فایل YAML با نام `dat_01.yaml` تا `dat_18.yaml` یا نگاشت معادل؛ حضور فایل Schema؛ قاعده `applicable_models`.
+  - از `sim800-at-urc`: حضور `at_commands.yaml`, `urcs.yaml` و مانند؛ پوشش ۹ ماژول `SIM800, SIM800A, SIM800C, SIM800C-DS, SIM800F, SIM800H, SIM800L, SIM808, SIM868`؛ ابزارهای `generate.py` و `validate.py`؛ طرح‌واره‌های JSON؛ قرارداد خروجی C++17 هدر-فقط `inline constexpr`.
+  - از `sim800-capabilities`: حضور ۹ مدل در `data/models/*.yaml`؛ فایل‌های `scope/sources/out-of-scope`؛ `schema/*.json`؛ کد `src/sim800_capabilities/`؛ CLI با دستورات `validate, list, show, get, find, compare, export, generate, audit, conflicts`؛ مولد C++ قابلیت‌ها؛ تست‌ها؛ مجوز MIT؛ فیلدهای الزامی هر قابلیت: `status, source_id, source_ref, confidence`.
+- اختلاف manifest با انتظارات در Open TODOs و اختلاف معنایی در Open TODOs و Risks ثبت شود و اجرا ادامه یابد.
+- اگر پروژه خواهر کامل در دسترس نبود: آن پروژه در Approval Needed و پورت آن انجام نمی‌شود؛ دو پروژه دیگر ادامه می‌یابند. اگر هر سه غیرقابل‌دسترس باشند: توقف.
+- اگر مجوز اجازه پورت نمی‌دهد: آن بخش به Approval Needed منتقل و پورت نمی‌شود.
+
+Checkpoint 2.1: گزارش میان‌دوره‌ای با manifest هر سه پروژه، منبع، `resolved_path` redact‌شده، اختلاف با انتظارات، ریسک باقی‌مانده push و هر مورد blocked. ثبت مصرف فاز.
+
+### فاز ۲.۲ — پورت داده از `sim800l-data-16` به `dataset/`
+
+- رکوردهای موجود `dataset/*.jsonl` تغییر نمی‌کنند؛ فقط append مجاز است.
+- برای هر مجموعه‌داده YAML در پروژه خواهر: نام JSONL متناظر شناسایی شود؛ در نبود تطابق مستقیم، نام‌گذاری قاعده‌مند و ثبت در گزارش.
+- YAML با ابزار استاندارد خوانده و به رکوردهای JSON با ساختار معادل تبدیل شود. هیچ فیلدی حذف یا تغییر معنایی نشود؛ کلیدهای اضافی حفظ و در `properties` Schema با `"$comment": "ported: <source-field>"` علامت‌گذاری شوند.
+- هر رکورد جدید با provenance داخلی (`_provenance` در رکورد، یا در صورت ممنوعیت ساختاری در `dataset/.provenance/<name>.json`) شامل `source_repo, source_commit, source_file, source_sha256, ported_at, ported_by`.
+- تکراری‌زدایی: رکورد معادل پس از نرمال‌سازی کلیدها افزوده نمی‌شود و در گزارش ثبت می‌گردد.
+- اعتبارسنجی هر رکورد جدید علیه Schema موجود یا گسترش‌یافته. fail: رکورد افزوده نمی‌شود و در Open TODOs ثبت می‌گردد.
+- افزودن فقط با append؛ خطوط قبلی دست‌نخورده. پس از append اعتبارسنجی کامل کل فایل.
+- کامیت جداگانه برای هر مجموعه‌داده: `data(<dataset>): import <N> records from sim800l-data-16@<short-sha>`.
+- اگر `dataset/foo.jsonl` صفر بایت یا effectively empty و منبع معتبر وجود دارد، پر می‌شود؛ اگر منبع نبود `insufficient evidence` ثبت می‌گردد.
+
+### فاز ۲.۳ — ایجاد مولد هدر C++17 از `sim800-at-urc` و تولید هدرها
+
+- ایجاد `src/generators/cpp_header/` و `generated/cpp/` در نبود.
+- نوشتن `src/generators/cpp_header/generate_headers.py`:
+  - ورودی: `dataset/*.jsonl` و/یا YAMLهای پورت‌شده.
+  - خروجی: هدرهای C++17 هدر-فقط با `inline constexpr` مطابق قرارداد `sim800-at-urc`.
+  - برای هر ۹ ماژول هدر معادل تولید شود.
+  - ساختار هم‌ارز: `at_commands.hpp`, `urcs.hpp` و مشابه؛ types و constexprها با نام‌گذاری متناظر.
+  - هر هدر comment provenance داشته باشد: `// generated from: <source>, commit: <sha>, date: <iso>`.
+- اجرای اسکریپت و تولید در `generated/cpp/`؛ خروجی در `cache/generated/` کش شود.
+- تست سازگاری:
+  - مسیر پروژه خواهر از `manifest.json` و فیلد `resolved_path` خوانده شود؛ در حالت `network_fallback` مسیر clone شبکه‌ای ملاک است.
+  - پیش از اجرا `git status --porcelain` در working tree خواهر ثبت؛ بعد از اجرا نیز ثبت و مقایسه؛ اختلاف = `sibling write violation`.
+  - `generate.py` پروژه خواهر با روش A (ترجیحی): `--out-dir <artifact>/sibling-outputs/sim800-at-urc/` یا متغیر معادل؛ یا روش B: کپی موقت به `<artifact>/sibling-temp/sim800-at-urc/` و اجرا در آن کپی. در حالت روش B، working tree اصلی خواهر دست‌نخورده می‌ماند.
+  - معیار پذیرش: تطابق مجموعه نمادهای constexpr و ساختار types؛ تفاوت‌های جزئی کامنت/ترتیب = cosmetic diff؛ تفاوت معنایی = functional diff در Open TODOs.
+- ثبت مسیر واقعی redact‌شده، source، commit SHA، دستور اجرا، روش A/B، نتیجه `git status` قبل/بعد.
+- تست کامپایل: `generated/cpp/smoke_test.cpp` همه هدرها را include و یک استفاده ساده از هر symbol کند؛ با `g++ -std=c++17 -fsyntax-only` کامپایل شود. اگر g++ نیست: `skipped: no c++ compiler` و در Open TODOs.
+- کامیت: `feat(generators): add C++17 header generator and generated headers from sim800-at-urc@<short-sha>`.
+
+### فاز ۲.۴ — گسترش یا افزودن Schemaها برای داده پورت‌شده AT/URC
+
+- برای هر `dataset/*.jsonl` با فیلد/نوع جدید: Schema موجود گسترش یابد: افزودن `properties`، گسترش `type`، حذف `required` که در رکورد جدید غایب است.
+- اگر Schema وجود ندارد، از الگوریتم استنتاج استفاده و با داده پورت‌شده اعتبارسنجی شود.
+- هر تغییر Schema با شاهد شناسه رکورد پورت‌شده و در کامیت جداگانه: `schema(<name>): extend for ported records from sim800l-data-16@<short-sha>`.
+- Schemaهای جدید برای ساختارهای بدون معادل در پروژه هدف مانند `apn_mcc_mnc`, `boards` از الگوریتم استنتاج روی داده پورت‌شده ساخته شوند.
+
+Checkpoint 2: گزارش میان‌دوره‌ای با رکوردهای پورت‌شده، هدرهای تولیدشده، Schemaهای گسترش‌یافته، تفاوت‌های مولد، نتایج `git status` قبل/بعد در sibling، و هر مورد blocked. ثبت مصرف فاز.
+
+### فاز ۲.۵ — پورت پایگاه داده قابلیت‌های سخت‌افزاری از `sim800-capabilities`
+
+- پورت داده:
+  - `data/models/*.yaml` → `data/capabilities/models/*.yaml` برای همه ۹ مدل.
+  - `data/scope.yaml`, `data/sources.yaml`, `data/out-of-scope.yaml` → `data/capabilities/`.
+  - `data/capabilities.yaml` در مقصد مجدداً تولید شود، نه کپی دستی.
+  - هر YAML پورت‌شده comment provenance در بالای فایل: source repo, commit, sha256, date.
+- قابلیت‌های داخل محدوده ۱۳ دسته: `bands, data_features, gprs, bluetooth, gpio, adc, pcm, usb, sim_interface, uart_serial, gnss, environmental, power`.
+- قابلیت‌های خارج از محدوده ۱۰ مورد در `data/capabilities/out-of-scope.yaml` با دلیل ثبت شوند و حذف نشوند: `audio, keypad, spi, i2c, sd, camera, fm, charging, dimensions, antenna`.
+- هر فیلد/قابلیت باید `status, source_id, source_ref, confidence` داشته باشد.
+- پورت Schemaها: `schema/*.json` → `data/capabilities/schema/*.json` با حفظ نام‌گذاری و افزودن provenance از طریق `.provenance.json` چون JSON کامنت ندارد.
+- پورت کد: `src/sim800_capabilities/` → `src/capabilities/` با حفظ ساختار و نام‌گذاری و به‌روزرسانی importها. entry point در `pyproject.toml`/`setup.py` خواهر به CLI پروژه هدف منتقل یا ادغام شود، نه کپی مستقیم.
+- ادغام CLI:
+  - مجاز و در دسته استثنای اقدام مخرب؛ با برچسب `allowed port change: cli entry-point` ثبت شود.
+  - محدوده مجاز تغییر در `src/`: فقط نقطه ورود CLI. بازنویسی منطق موجود ممنوع. اگر نقطه ورود فایل بزرگ‌تر است، افزودن import و یک فراخوانی زیرفرمان مجاز است؛ بقیه دست‌نخورده. اگر نیاز به بیش از `min(50, ceil(0.20 × N))` خط تغییر در نقطه ورود بود، ابتدا در Approval Needed ثبت و اجرا نشود.
+  - اگر پروژه هدف CLI دارد، دستور `capabilities` به‌عنوان زیرفرمان اضافه شود که به `src/capabilities/cli.py` تفویض می‌کند. اگر CLI ندارد، `src/capabilities/cli.py` ماژول مستقل بماند و در `docs/` نحوه استفاده ثبت شود.
+  - همه دستورات `validate, list, show, get, find, compare, export, generate, audit, conflicts` باید کار کنند و حداقل ۳ دستور تست شوند.
+  - تغییر در فایل‌های CLI زیرفرمان‌های دیگر مجاز نیست؛ در صورت نیاز در Approval Needed ثبت شود.
+- ادغام مولد C++ قابلیت‌ها:
+  - مولد موجود به `src/generators/cpp_header/` منتقل/ادغام شود (می‌تواند `generate_capabilities_header.py` باشد) و `generated/cpp/sim800_capabilities.hpp` تولید شود.
+  - مسیر مولد اصلی از `manifest.json` پروژه `sim800-capabilities` و فیلد `resolved_path` خوانده شود؛ در حالت `network_fallback` مسیر clone شبکه‌ای ملاک است.
+  - اجرای مولد اصلی خواهر با `--out-dir` به `<artifact>/sibling-outputs/sim800-capabilities/` یا در کپی موقت `<artifact>/sibling-temp/sim800-capabilities/`؛ در حالت روش B، working tree اصلی خواهر دست‌نخورده می‌ماند. `git status --porcelain` قبل/بعد ثبت و مقایسه؛ اختلاف = `sibling write violation`.
+  - تست سازگاری با مولد اصلی؛ دستور اجرا، مسیر redact‌شده، source، commit SHA، روش A/B ثبت شود.
+  - cosmetic diffs مجاز؛ functional diffs در Open TODOs.
+  - اگر g++ موجود است، `sim800_capabilities.hpp` در `smoke_test.cpp` include شود.
+- پورت تست‌ها: تست‌های `sim800-capabilities` در `tests/` به `tests/capabilities/` منتقل و اجرا شوند. نیاز به منبع خارجی = `environmental failure`.
+- اعتبارسنجی همه YAMLهای پورت‌شده علیه Schemaهای متناظر. رکورد نامعتبر رد و در Open TODOs ثبت.
+- کامیت‌های جداگانه:
+  - `data(capabilities): port models and scope from sim800-capabilities@<short-sha>`
+  - `schema(capabilities): port schemas from sim800-capabilities@<short-sha>`
+  - `feat(capabilities): port src/sim800_capabilities and merge CLI`
+  - `feat(generators): port capabilities C++ generator and produce sim800_capabilities.hpp`
+  - `test(capabilities): port tests from sim800-capabilities@<short-sha>`
+
+Checkpoint 2.5: گزارش میان‌دوره‌ای با مدل‌های پورت‌شده، قابلیت‌های پوشش‌داده‌شده، خارج از محدوده و دلیل، نتایج اعتبارسنجی/تست، تفاوت‌های مولد، دامنه دقیق تغییر CLI، `git status` قبل/بعد در sibling و موارد blocked. ثبت مصرف فاز.
+
+### فاز ۳ — اعتبارسنجی نهایی، چک‌لیست پاریتی و گزارش
+
+- اجرای کامل `pytest`, `ruff`, `mypy` در صورت وجود؛ اعتبارسنجی همه Schemaها و داده‌ها (AT/URC و قابلیت‌ها).
+- `mkdocs build --strict` اگر `mkdocs.yml` و mkdocs نصب است؛ خروجی در artifact یا `.gitignore` برای `site/`.
+- چک‌لیست پاریتی در گزارش: جدول هر قابلیت سه پروژه خواهر با وضعیت پوشش. پوشش حداقلی: ۱۸ فایل `dat_01.yaml` تا `dat_18.yaml` یا نگاشت معادل؛ ۹ ماژول `sim800-at-urc`؛ ۹ مدل و ۱۳ دسته قابلیت داخل محدوده؛ ۱۰ قابلیت خارج از محدوده با دلیل؛ دو ابزار مولد C++؛ Schemaهای متناظر.
+- `Manifest vs Acceptance Reconciliation` در دو جدول: هر فایل manifest بدون پوشش در چک‌لیست با دلیل؛ هر آیتم چک‌لیست که در manifest نیست با دلیل.
+- اگر قابلیتی blocked یا not covered است، در Open TODOs و Approval Needed با دلیل و پیشنهاد ثبت شود.
+- اسکن نهایی secrets، مجوز، حجم فایل، encoding.
+- تولید گزارش نهایی با redact مسیرهای مطلق.
+- تولید `diff.patch`, `commits.txt`, `parity-checklist.md`, `usage.md`, `changes.md`, `source-snapshot-<short-sha>.zip`, `changes-bundle-<short-sha>.zip` در artifact.
+- `SIM800-Monorepo` در Approval Needed با دلیل عدم دسترسی ثبت شود؛ تصمیم درباره تجمیع منوط به دسترسی به محتوا و ارزیابی سازگاری است.
+- ثبت مصرف نهایی، مقایسه با بودجه، رویدادهای بودجه در `usage.md` و `usage.json`.
+
+---
+
+## ۹. الگوریتم استنتاج Schema
+
+برای هر `data/schemas/*.schema.json` یا `data/capabilities/schema/*.json` که صفر بایت یا effectively empty است:
+
+- فایل داده متناظر شناسایی شود: `dataset/<name>.jsonl` یا `data/capabilities/models/<name>.yaml`.
+- اگر موجود نیست یا کمتر از ۳ رکورد معتبر دارد: `insufficient evidence`، بدون توقف.
+- اگر حجم > ۱۰ MB یا خطوط > ۱۰۰۰۰: فقط N=10000 رکورد اول برای استنتاج، `sampled: first N records`، اعتبارسنجی نهایی استریم.
+- `$schema`: `"https://json-schema.org/draft/2020-12/schema"`.
+- `type` ریشه بر اساس انواع مشاهده‌شده؛ اگر همه object، `type: "object"`؛ در غیر این صورت اتحادیه انواع مشاهده‌شده و `properties/required` فقط برای نمونه‌های object.
+- برای هر فیلد در رکوردهای object:
+  - `required`: حضور در ۱۰۰٪ نمونه؛ `required evaluated on sampled N records`؛ در نبود ارجاع کد/مستند `data-only required`.
+  - `optional`: حضور در بعضی.
+  - `type`: اتحادیه انواع مشاهده‌شده؛ تناقض حل‌نشدنی → `"$comment": "TODO: type inconsistency"` با اتحادیه همه انواع.
+  - `enum`: فقط `string`، حضور در ۱۰۰٪ نمونه، مقادیر یکتا ≤ ۱۰، و شاهد صریح کد/مستند؛ در غیر این صورت کاندید در Open TODOs.
+  - `additionalProperties: true` پیش‌فرض؛ `false` فقط با مستند صریح.
+  - ساختار تودرتو: object بازگشتی؛ array با `items` استنتاجی؛ عمق > ۲ یا تنوع بالا → `items: {}` یا sub-schema حداقلی با `"$comment": "TODO: nested structure too varied"`.
+- کامنت فقط با `$comment`؛ هرگز `//` یا کامنت غیراستاندارد.
+- اعتبارسنجی با `Draft202012Validator.check_schema()` و سپس همه رکوردها؛ استریم برای حجیم.
+- تعدیل پس از اعتبارسنجی کامل: fail در رکوردهای خارج از نمونه با شاهد:
+  - `required` غایب در رکورد کامل → optional.
+  - `type` بدون پوشش نوع جدید → گسترش اتحادیه.
+  - `enum` بدون پوشش مقدار جدید → حذف یا گسترش فقط با شاهد مستند/کد و کاندید در Open TODOs.
+  - `additionalProperties: false` که با فیلد جدید fail می‌دهد → `true` مگر مستند صریح خلاف.
+- شماره/شناسه رکورد ثبت و مجدداً اعتبارسنجی. fail باقی‌مانده با شاهد در Open TODOs.
+- Weak → Medium. `no required` جداگانه.
+- خروجی UTF-8 بدون BOM با LF.
+
+---
+
+## ۱۰. سیاست تغییر تست‌ها
+
+تغییر تست فقط با اثبات نادرست بودن آن با شاهد، در کامیت جداگانه `test(<scope>): fix incorrect assertion` با توضیح شاهد. تغییر تست صرفاً برای پاس شدن ممنوع. فایل تست صفر بایت پر نمی‌شود. fail ناشی از نبود منبع خارجی (شبکه، سخت‌افزار، PDF، متغیر محیطی) = `environmental failure`. failهای قبلی غیرمسدودکننده اجرا را متوقف نمی‌کنند، مگر اعتبارسنجی یا ادامه کار را مسدود کنند یا ناشی از تغییرات جدید این اجرا باشند.
+
+---
+
+## ۱۱. محدوده فرمت‌های Schema
+
+فقط `.schema.json` و `data/capabilities/schema/*.json` با JSON Schema استاندارد در محدوده تکمیل خودکار. Avro، Protobuf، OpenAPI، YAML schema و مانند فقط گزارش می‌شوند.
+
+---
+
+## ۱۲. محدوده زمانی و توکنی
+
+- حداکثر زمان اجرا: ۱۴ ساعت از `install_start_time` یا در نبود نصب `run_start_time`.
+- حداکثر ۱۵۰ کامیت.
+- حداکثر بودجه توکن طبق `budget.yaml` و `api_calls_max`.
+- حداکثر مصرف context طبق آستانه‌ها.
+- زمان شروع، پایان، پایان هر فاز و مصرف هر فاز ثبت می‌شود.
+- در رسیدن به هر سقف: توقف و گزارش میان‌دوره‌ای با وضعیت، تغییرات، موارد باقی‌مانده و مصرف بودجه.
+
+---
+
+## ۱۳. شرایط توقف
+
+- شکست نصب وابستگی‌ها بدون جایگزین محلی.
+- قطع دسترسی به PyPI یا GitHub بدون cache و بدون `SIBLINGS_LOCAL_PATH` معتبر.
+- unavailable بودن `pytest` یا `jsonschema`.
+- شکست اسکریپت شناخته‌شده به‌دلیل نبود منبع ضروری که اعتبارسنجی یا ادامه کار را مسدود کند؛ در غیر این صورت `environmental failure` و ادامه.
+- fail تست‌های اولیه که اعتبارسنجی یا ادامه کار را مسدود کند یا ناشی از تغییرات جدید باشد و با حداقل اصلاح رفع نشود.
+- شناسایی secret با اطمینان بالا در کامیت‌های جدید.
+- عدم موفقیت تست غیرفعال‌سازی push، مگر `skipped: no origin remote`؛ fallback local-only متوقف نمی‌کند و فقط ریسک باقی‌مانده ثبت می‌شود.
+- working tree ناتمیز در baseline.
+- عدم تنظیم `user.name` یا `user.email`.
+- عدم دسترسی کامل به یکی از سه پروژه خواهر به‌گونه‌ای که manifest قابل تولید نباشد: آن پروژه در Approval Needed و پورت آن انجام نمی‌شود؛ دو پروژه دیگر ادامه می‌یابند. توقف کامل فقط اگر هر سه غیرقابل‌دسترس باشند.
+- رسیدن به محدوده زمانی، تعداد کامیت یا بودجه توکن (`halt` = ۹۵٪).
+- تناقض صریح غیرقابل‌حل با شواهد.
+- `sibling write violation` با اطمینان بالا: اجرای آن ابزار متوقف و با روش B دوباره اجرا شود؛ اگر همچنان نقض شد، آن بخش به Approval Needed منتقل شود.
+- برآورد پیش از اجرا بیش از ۸۰٪ بودجه کل.
+
+---
+
+## ۱۴. قواعد اجرا
+
+- تحلیل و برنامه‌ریزی پیش از تغییر.
+- هیچ فایل حیاتی بدون جایگزین معتبر حذف نشود.
+- هیچ Schema خالی یا effectively empty با محتوای حدسی پر نشود.
+- هر تغییر با تست یا اعتبارسنجی متناظر همراه باشد.
+- تغییرات کوچک، گام‌به‌گام، قابل بازبینی.
+- اقدامات مخرب فقط گزارش شوند و اجرا نشوند، مگر استثناهای صریح. فهرست در Approval Needed.
+- شکست اسکریپت: علت ریشه‌ای و حداقل اصلاح.
+- کامیت‌های کوچک، معنادار، پیام انگلیسی با الگوی `type(scope): description`.
+- پیش از کامیت: `git diff --check` و `git diff --cached --check`.
+- پیش از کامیت: `ruff check` روی Pythonهای تغییر‌یافته. در fail: `ruff check --fix` بدون `--safe`. اگر `--unsafe-fixes` لازم بود، بدون تأیید اجرا نشود. اگر `--fix` بخواهد فایل `tests/` یا `src/` را تغییر دهد، کامیت نشود و `blocked by lint (unsafe fix target)` ثبت شود. استثنا: برای stubهای جدید همین اجرا در `src/`، `--fix` مجاز و `lint fix applied to generated stub` ثبت شود. fail باقی‌مانده → `blocked by lint` و ادامه اجرا.
+- پیش از کامیت: `python -m json.tool` روی JSONهای تغییر‌یافته؛ هر خط JSONL جداگانه با `json.loads`.
+- کامیت خالی ممنوع (`--allow-empty`). نبود تغییر لازم: `no changes needed`.
+- امکان `git revert` هر کامیت حفظ شود. بازنویسی history یا `git reset --hard` روی شاخه اصلی ممنوع.
+- فقط `git add <explicit paths>`؛ `git add -A` و `git add .` ممنوع. پس از stage: `git diff --cached --name-only` بررسی شود. `__pycache__/`, `.pytest_cache/`, `.ruff_cache/`, `.mypy_cache/`, `.venv/`, venvهای اجرایی stage نشوند.
+- افزودن ورودی به `.gitignore` در کامیت جداگانه `chore(gitignore): ignore cache directories`.
+- همه فایل‌های تولیدی UTF-8 بدون BOM با LF. `check_encoding.py` در artifact ذخیره و خروجی‌اش در گزارش. خود اسکریپت نیز UTF-8 بدون BOM با LF.
+- `check_encoding.py` پسوندهای باینری `.png, .jpg, .jpeg, .gif, .pdf, .zip, .tar, .gz, .woff, .woff2, .ttf, .so, .pyc, .ico` و پوشه‌های `.git/`, `.venv/`, venvهای اجرایی و symlinkها را skip کند. فایل متنی با decode UTF-8 بررسی؛ fail → `non-utf8`.
+- اگر `mkdocs.yml` و mkdocs نصب: `mkdocs build --strict`. اگر `site/` در `.gitignore` نیست، با `--site-dir <artifact>/mkdocs-site`. در نبود mkdocs: `docs validation skipped`.
+- اگر Makefile هدف `test` دارد: محتوای target بررسی؛ اگر فقط pytest یا اسکریپت شناخته‌شده، `make test`؛ در غیر این صورت pytest مستقیم و دلیل ثبت شود.
+- هیچ ابزار یا اسکریپتی از پروژه خواهر نباید در working tree آن بنویسد. پیش و پس از هر اجرا `git status --porcelain` ثبت و مقایسه شود.
+- گزارش نهایی مسیرهای مطلق محلی را redact می‌کند: `resolved_path` و هر مسیر داخل `$SIBLINGS_LOCAL_PATH` یا `<parent-of-repo>` به شکل نمادین.
+- رعایت قواعد بخش ۲ در همه فازها الزامی است.
+- خروجی‌های میانی معتبر در `cache/` کش شوند و در اجرای مجدد بازاستفاده گردند.
+- پس از هر فاز: به‌روزرسانی `usage.json`, `state.json` و بررسی آستانه‌های بودجه.
+
+---
+
+## ۱۵. قید انتشار و تحویل خروجی
+
+- همه کارها فقط محلی. remote پروژه هدف و سه پروژه خواهر فقط‌خواندنی؛ working treeهای محلی قابل تغییر.
+- `git push`، Pull Request، Issue، Release، Gist، آپلود به GitHub یا هر سرویس خارجی ممنوع.
+- غیرفعال‌سازی دو لایه‌ای push در هر چهار مخزن: `git config --local push.default nothing` و `git remote set-url --push origin no_push`. موفقیت فقط با دو شرط هم‌زمان: `git remote get-url --push origin == no_push`؛ و `git push --dry-run origin HEAD` و `git -c push.default=current push --dry-run origin HEAD` هر دو خروج غیرصفر. دلیل مورد انتظار شکست: نامعتبر بودن `no_push` به‌عنوان URL و/یا `push.default nothing`. خروجی خام و کد خروج ثبت شوند. دستورهای بازگردانی ثبت شوند.
+- در `SIBLINGS_LOCAL_PATH` که `.git/config` قابل نوشتن نیست: غیرفعال‌سازی دائمی ممکن نیست و ریسک باقی‌مانده است. تست push با `git -c remote.origin.pushurl=no_push push --dry-run origin HEAD` و `git -c push.default=current -c remote.origin.pushurl=no_push push --dry-run origin HEAD` انجام و نتیجه با برچسب `local-only push test` و خروجی خام و کد خروج ثبت شود. در گزارش نهایی در Risks با عنوان `residual risk: push not permanently disabled in read-only sibling` ثبت شود. دستور بازگردانی لازم نیست؛ همین در گزارش ثبت گردد.
+- هیچ فایلی از خروجی‌ها، گزارش‌ها، آرشیوها، PDFها یا داده‌های مشتق‌شده در GitHub بارگذاری نشود.
+- تغییرات در شاخه `ai/full-completion`، خروجی محلی.
+- خروجی نهایی در artifact شامل: گزارش کامل فارسی، `changes.md`، `diff.patch`، `commits.txt` (SHA + پیام + خلاصه)، `environment.lock.txt`، `tool-versions.txt` در صورت استفاده، `zero-byte-snapshot.txt`، `check_encoding.py`، `parity-checklist.md`، `usage.md`، `usage.json`، `budget.yaml`، `cost-estimate.json`، `state.json`، `reads.json`، `siblings-manifests/<name>.json` برای هر سه پروژه، `source-snapshot-<short-sha>.zip` و `changes-bundle-<short-sha>.zip`.
+- ZIPها فقط در پایان و فقط در artifact ساخته می‌شوند؛ نه در هر فاز، نه به‌عنوان تنها خروجی، نه به‌جای شاخه/diff/commits/گزارش. `source-snapshot` از `git archive HEAD` با prefix ساخته می‌شود و شامل `.git/`، untracked، venv، cache، artifact، PDF اصلی، secret، فایل حجیم غیرضروری و محتوای دارای محدودیت مجوز نیست. `changes-bundle` شامل artifactهای مجاز و بدون cache/context/tool-outputs/sibling-temp/sibling-outputs/venv است. SHA256 هر دو ZIP در گزارش و `usage.json` ثبت می‌شود. هر فایل حذف‌شده از ZIP با دلیل در گزارش و Open TODOs ثبت می‌شود.
+- هیچ کامیت یا آرشیو شامل PDF اصلی، محتوای دارای محدودیت مجوز، اطلاعات حساس، کلید، توکن یا فایل حجیم غیرضروری نباشد.
+- اسکن secrets:
+  - `gitleaks git --log-opts="--all"` یا `gitleaks detect --source . --log-opts="--all"` برای working tree + تاریخچه.
+  - `detect-secrets scan` فقط working tree.
+  - فقط `detect-secrets` موجود: `history not scanned (detect-secrets only)`.
+  - هیچ ابزار موجود: basic regex برای AWS, GitHub token, private key, password با اسکریپت Python؛ `basic regex scan`؛ کامل `skipped: no tool`.
+  - shallow: `git rev-parse --is-shallow-repository`؛ true → محدودیت `--log-opts="--all"` ثبت.
+  - Triage: یافته فقط در تاریخچه پیش از baseline = `pre-existing`. یافته در کامیت‌های جدید با اطمینان بالا = توقف. یافته در مستندات/fixture/schema نمونه یا placeholder = `likely false positive`. متوسط/نامشخص = `candidate secret` و ادامه. دلیل triage و مسیر ثبت شود.
+- اسکن حجم: `find . -path ./.git -prune -o -path ./.venv -prune -o -type f -size +1M -print` بدون `.git`, `.venv`, symlink گزارش شوند. نتیجه ثبت.
+- بررسی `.gitignore` و `.gitattributes` برای PDF، فایل حجیم، cacheها. نتیجه ثبت.
+- بررسی مجوز هر چهار مخزن و ثبت نام. در صورت عدم اجازه پورت از یک پروژه خواهر، آن بخش به Approval Needed منتقل و پورت نمی‌شود.
+- بازبینی نهایی فقط پس از بررسی دستی کاربر.
+
+---
+
+## ۱۶. قالب گزارش نهایی
+
+گزارش در `<parent-of-repo>/sim800-audit-output/report.md` شامل بخش‌های زیر است:
+
+- `# گزارش اجرای AI Agent — sim800-platform-all-new9 (Full Completion — Final)`
+- `## Checklist` با ۲۳ مورد بخش ۳
+- `## Baseline` شامل commit SHA، branch، Python، OS، run/install/end time، وضعیت `SIBLINGS_LOCAL_PATH` redact‌شده، working tree، git identity، نسخه ابزارها، شبکه، نصب، editable، artifact redact‌شده، origin، push URL اصلی، Python match، LFS/submodule، مجوز هدف، commit/license/source/resolved_path هر سه خواهر redact‌شده، `SIM800-Monorepo: unavailable`، بودجه و context thresholds
+- `## Usage & Budget` شامل برآورد، مصرف نهایی به تفکیک فاز، درصد، cache hit/miss، compactionها، warn/halt، مقایسه برآورد/واقعی، مسیر `usage.json` و `usage.md`
+- `## Zero-byte Snapshot` شامل فهرست صفر بایت بدون `.gitkeep`، effectively empty و مسیر snapshot
+- `## Phase 1 — Empty File Completion` شامل Schemaهای پر‌شده، weak، no required، incomplete، insufficient evidence، pre-existing invalid، `$ref` نامعتبر/خارجی، unvalidated due to external ref، `$schema` قدیمی، کاندیدهای enum داده‌تنها، خلاصه `N data-only required` در `M schema`
+- `## Phase 2 — Porting from Siblings`
+  - `### 2.1` source/commit/license/resolved_path redact‌شده، تعداد فایل/رکورد manifest، اختلاف با انتظارات، push disable verification با خروجی خام و کد خروج، local-only و residual risk
+  - `### 2.2` YAML مبدأ، JSONL مقصد، تعداد افزوده/تکراری/ردشده، provenance، کامیت‌ها
+  - `### 2.3` ۹ ماژول، مسیر مولد/خروجی، مسیر خواهر redact‌شده، source، commit، روش A/B، دستور، `git status` قبل/بعد، cosmetic/functional diffs، smoke compile
+  - `### 2.4` Schemaهای گسترش‌یافته/افزوده با دلیل و شاهد
+  - `### 2.5` ۹ مدل با provenance، ۱۳ دسته داخل محدوده، ۱۰ خارج از محدوده با دلیل، Schemaها، ادغام CLI شامل وضعیت CLI هدف، `allowed port change: cli entry-point`، فایل‌ها و خطوط تغییر، حداقل ۳ دستور تست‌شده، تولید `sim800_capabilities.hpp` با مسیر redact‌شده/source/commit/روش/دستور، `git status` قبل/بعد، cosmetic/functional diffs، تست‌های پورت‌شده، کامیت‌ها
+- `## Phase 3 — Parity Checklist` جدول `Capability | Source | Status | Target Equivalent | Note` شامل ۱۸ فایل داده، ۹ ماژول، ۹ مدل، ۱۳ دسته، ۱۰ خارج از محدوده
+- `## Manifest vs Acceptance Reconciliation` دو جدول: فایل‌های manifest بدون پوشش با دلیل؛ قابلیت‌های انتظاری غایب از manifest با دلیل
+- `## Before/After Test Status` pytest/ruff/mypy قبل/بعد، تفکیک fail قبلی/جدید، environmental failures
+- `## Changes by Category` شامل Schemas, Datasets, Capabilities Data, Generators/Generated, Scripts, Tests, Documentation, Configuration, Other
+- `## Open TODOs` شامل weak/no required/incomplete، `$ref`، JSONL نامعتبر، non-object، effectively empty پرنشده، unvalidated، `$schema` قدیمی، enum داده‌تنها، functional diffs، شکاف‌های پاریتی، اختلاف manifest، data-only required، sibling write violation، دلیل و شاهد
+- `## Deleted Files + Reason` فقط پیشنهاد، اجرا نشده
+- `## Secrets / License / Size Scan` شامل ابزار، triage، false positive، shallow، حجم، مجوز چهار مخزن، `.gitignore/.gitattributes`، encoding/line-ending
+- `## Commits` شامل SHA، پیام، خلاصه
+- `## Local Git Config Changes` شامل پروژه هدف و سه clone یا local-only، دستورهای بازگردانی، در local-only اعلام نبود تغییر در `.git/config` و محافظت فقط با override
+- `## Risks` شامل Critical/High/Medium/Low و `residual risk: push not permanently disabled in read-only sibling`
+- `## Approval Needed` شامل حذف‌های پیشنهادی، رکوردهای ردشده، پورت‌های blocked به‌دلیل مجوز، خواهرهای غیرقابل‌دسترس، `SIM800-Monorepo` با دلیل عدم دسترسی، sibling write violation باقی‌مانده، برآورد > ۸۰٪ بودجه و هر مورد نیازمند تأیید انسانی
+- `## No Changes Needed` در صورت عدم نیاز
+- `## Final Archives` شامل نام، SHA256، مسیر redact‌شده، فایل‌های حذف‌شده و دلیل `source-snapshot-<short-sha>.zip` و `changes-bundle-<short-sha>.zip`
+
+---
+
+## ۱۷. معیارهای پذیرش
+
+- همه بندهای تعریف مفاهیم کلیدی برای effectively empty، weak، no required، incomplete، data-only required، شاهد، اقدام مخرب، استثناها، ممنوعیت نوشتن در sibling و افشای مسیر رعایت شده باشد.
+- Baseline کامل با redact مسیرهای مطلق ثبت شده باشد؛ working tree تمیز یا اجرا متوقف و ثبت شده باشد؛ هویت کامیت پیش از هر کامیت بررسی و در صورت نبود متوقف شده باشد.
+- `budget.yaml`, `usage.json`, `cost-estimate.json`, `state.json`, `reads.json`, `cache/` تولید/مقداردهی و استفاده شده باشند؛ آستانه‌های compaction/warn/halt رعایت شده باشند؛ خروجی ابزارهای بزرگ در `tool-outputs/` و خلاصه در context درج شده باشد؛ `usage.md` و بخش `Usage & Budget` موجود باشد؛ مصرف با بودجه مقایسه و رویدادها ثبت شده باشند؛ محدودیت ۱۵۰ کامیت و ۱۴ ساعت رعایت شده باشد.
+- هیچ Schema حیاتی صفر بایت یا effectively empty بدون دلیل مستند در `data/schemas/` یا `data/capabilities/schema/` نمانده باشد؛ همه Schemaهای تولید/اصلاح‌شده `$schema` صریح draft 2020-12 داشته باشند؛ Schemaهای قدیمی ثبت شده باشند؛ weak/no required/incomplete/`$ref`/unvalidated/pre-existing invalid/malformed/non-object/insufficient evidence دسته‌بندی و ثبت شده باشند؛ `required` روی نمونه ارزیابی و `data-only required` علامت‌گذاری شده باشد؛ enum فقط با شاهد مستند/کد و شرایط تعریف‌شده؛ تعدیل پس از اعتبارسنجی کامل فقط با شاهد و شناسه رکورد؛ نمونه‌گیری N و استریم مستند شده باشد.
+- هر سه پروژه خواهر از `SIBLINGS_LOCAL_PATH` یا clone شبکه‌ای در دسترس و source ثبت شده باشد؛ push در چهار مخزن دو لایه غیرفعال و تست شده باشد یا local-only با residual risk ثبت شده باشد؛ manifest هر سه با ساختار کامل در `siblings-manifests/` تولید شده باشد؛ اختلاف با انتظارات در Open TODOs ثبت شده باشد؛ مجوزها ثبت و در صورت عدم اجازه پورت، بخش به Approval Needed منتقل شده باشد.
+- همه ۱۸ فایل داده یا نگاشت معادل با provenance کامل پورت شده باشند یا در Approval Needed/Open TODOs با دلیل ثبت شده باشند؛ رکوردهای موجود تغییر نکرده و فقط append شده باشد؛ تکراری‌زدایی ثبت شده باشد؛ رکوردهای جدید معتبر یا ردشده در Open TODOs ثبت شده باشند.
+- برای هر ۹ ماژول هدر C++17 تولید شده باشد یا blocked/not applicable با دلیل ثبت شده باشد؛ `sibling write violation` رخ نداده یا با روش B رفع شده باشد؛ `git status` قبل/بعد در همه اجراهای خواهر ثبت شده باشد؛ سازگاری مولد AT/URC با مسیر redact‌شده/source/commit/روش/دستور و تفکیک cosmetic/functional ثبت شده باشد؛ smoke compile در صورت وجود g++ اجرا یا skipped ثبت شده باشد؛ Schemaهای گسترش‌یافته با شاهد و کامیت جداگانه ثبت شده باشند.
+- همه ۹ مدل `sim800-capabilities` معادل YAML داشته باشند؛ همه ۱۳ قابلیت داخل محدوده با provenance پورت شده باشند؛ همه ۱۰ قابلیت خارج از محدوده با دلیل در `out-of-scope.yaml` ثبت شده باشند؛ Schemaها معتبر باشند؛ کد به `src/capabilities/` منتقل و importها به‌روزرسانی شده باشند؛ CLI قابلیت‌ها کار کند و حداقل ۳ دستور تست شده باشد؛ تغییر CLI محدود به نقطه ورود و با برچسب `allowed port change: cli entry-point` ثبت شده باشد؛ در نیاز به بیش از حد مجاز خط تغییر، در Approval Needed ثبت و اجرا نشده باشد؛ `sim800_capabilities.hpp` تولید و سازگاری ساختاری ثبت شده باشد؛ تست‌ها منتقل و پاس یا environmental failure ثبت شده باشند؛ هیچ فیلد/قابلیت بدون `status, source_id, source_ref, confidence` نباشد.
+- چک‌لیست پاریتی کامل و همه موارد covered/partially/not applicable/blocked علامت‌گذاری شده باشند؛ دو جدول Reconciliation پر شده باشند؛ blocked/not covered در Open TODOs و Approval Needed با پیشنهاد ثبت شده باشند؛ `SIM800-Monorepo` در Approval Needed ثبت شده باشد؛ همه مسیرهای مطلق در گزارش redact/نسبی شده باشند.
+- تست‌ها تا حد امکان پاس، تفاوت قبل/بعد و environmental failures جدا ثبت شده باشند؛ `environment.lock.txt`, `tool-versions.txt` در صورت استفاده، `zero-byte-snapshot.txt`, `check_encoding.py`, `parity-checklist.md`, `usage.md`, `usage.json`, `budget.yaml`, `cost-estimate.json`, `state.json`, `reads.json` و manifestها تولید شده باشند؛ همه فایل‌های تولیدی UTF-8 بدون BOM با LF و `check_encoding.py` نیز چنین باشد؛ check_encoding باینری‌ها، `.git/`, `.venv/`, venvها و symlinkها را skip کرده باشد؛ اسکن secrets/size/license/encoding/shallow و `.gitignore/.gitattributes` انجام و ثبت شده باشد.
+- `git diff --check` و `git diff --cached --check` پیش از هر کامیت اجرا شده باشند؛ فقط `git add <explicit paths>` استفاده شده باشد؛ stage با `git diff --cached --name-only` تأیید شده باشد؛ `.gitignore` در کامیت جداگانه با پیام مشخص افزوده شده باشد؛ کامیت خالی ایجاد نشده باشد یا `no changes needed` ثبت شده باشد؛ تعداد کامیت ≤ ۱۵۰ باشد.
+- هیچ تغییر در GitHub یا سرویس خارجی بارگذاری نشده باشد؛ خروجی نهایی فقط در artifact و آماده بازبینی دستی باشد؛ هیچ فایل حجیم/PDF ناخواسته، cache، venv/tool-venv، `cache/`, `context-summaries/`, `tool-outputs/`, `sibling-temp/`, `sibling-outputs/` در آرشیوهای نهایی نباشد؛ هیچ secret یا محتوای محدود مجوز اضافه نشده باشد؛ هیچ مسیر مطلق محلی در گزارش افشا نشده باشد.
+- محدودیت زمانی از `install_start_time` یا `run_start_time` محاسبه و ثبت شده باشد؛ `examples/` فقط گزارش شده باشد؛ اسکریپت‌های ناشناخته اجرا نشده باشند؛ فایل‌های CI تغییر نکرده باشند؛ `.gitkeep` در snapshot صفر بایت لحاظ نشده باشد؛ LFS pointerها و submoduleهای کلون‌نشده در استنتاج استفاده نشده باشند؛ رکوردهای معتبر non-object طبق قاعده root type مدیریت شده باشند؛ `SIM800-Monorepo` در دامنه ارزیابی و پورت قرار نگرفته و فقط در Approval Needed ثبت شده باشد؛ هیچ ابزار/اسکریپت خواهر در working tree خواهر ننوشته باشد و `git status` قبل/بعد ثبت شده باشد؛ ادغام CLI محدود به نقطه ورود و با برچسب `allowed port change: cli entry-point` ثبت شده باشد.
+- ZIPهای نهایی فقط در پایان، در artifact و با SHA256 ثبت‌شده تولید شده باشند؛ `source-snapshot-<short-sha>.zip` از HEAD و بدون `.git/`، untracked، venv، cache، artifact، PDF اصلی، secret و فایل حجیم غیرضروری باشد؛ `changes-bundle-<short-sha>.zip` شامل artifactهای مجاز و بدون cache/context/tool-outputs/sibling-temp/sibling-outputs/venv باشد؛ هیچ ZIP کامیت یا آپلود نشده باشد؛ ZIP جایگزین شاخه، diff، commits یا گزارش نشده باشد؛ هر فایل حذف‌شده از ZIP با دلیل در گزارش و Open TODOs ثبت شده باشد.

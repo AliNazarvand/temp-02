@@ -1,0 +1,7 @@
+a6964468a2b367068cc207bd7d308c970f63014c	chore(generators): stabilize provenance and test target
+82bf39f6efafd56db27301431abc389c2cdc892d	feat(generators): add reproducible AT URC header generator
+c5a363827c1c2270e69e6f660a5652a4716731e4	feat(capabilities): port capability database and merge CLI
+3611087aa701a9cb873154ffd940f10ecd5326c5	feat(generators): add AT and URC C++17 generated headers
+39f228947cf440316776281399fc2f286d72a1ae	fix(dataset): preserve existing command records during port
+07cae7e6a88dcfc5c5ec25b6919573838cf79b25	data(dataset): port sibling SIM800 records with provenance
+00448cada7a05ef89d368b98dc68b512d38f299c	feat(schema): complete evidenced dataset schemas and validation baseline
